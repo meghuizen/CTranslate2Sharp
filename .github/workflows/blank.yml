@@ -27,21 +27,25 @@ jobs:
     # ---------- prerequisites ----------
     - name: Install build deps
       run: |
+        sudo wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+        sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update
         sudo apt-get install -y build-essential cmake ninja-build \
-             swig g++-13 clang git
+             swig g++-13 clang git libomp-dev libmkl-dev intel-mkl libopenblas-dev libnccl2 libnccl-dev libopenmpi-dev \
+             libcudnn9-dev-cuda-12 libcudnn9-headers-cuda-12
         # CUDA Toolkit (12.x) is already on ubuntu-latest
 
     # ---------- clone CTranslate2 ----------
     - name: Fetch latest CTranslate2
       run: |
-        git clone --depth 1 $CT2_REPO ctranslate2
+        git clone --recursive $CT2_REPO ctranslate2
 
     # ---------- build CPU ----------
     - name: Build CPU libctranslate2
       run: |
         cmake -S ctranslate2 -B build_cpu -G Ninja \
-              -DCMAKE_BUILD_TYPE=$CT2_BUILD_TYPE \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DWITH_OPENBLAS=ON -DWITH_FLASH_ATTN=ON -DWITH_MKL=OFF \
               -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=OFF
         cmake --build build_cpu
         cp build_cpu/libctranslate2.so libctranslate2_cpu.so
@@ -50,8 +54,9 @@ jobs:
     - name: Build CUDA libctranslate2
       run: |
         cmake -S ctranslate2 -B build_cuda -G Ninja \
-              -DCMAKE_BUILD_TYPE=$CT2_BUILD_TYPE \
-              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=ON
+              -DCMAKE_BUILD_TYPE=Release \
+              -DWITH_OPENBLAS=ON -DWITH_FLASH_ATTN=ON -DWITH_MKL=OFF -DWITH_CUDNN=ON \
+              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=ON -DWITH_TENSOR_PARALLEL=ON
         cmake --build build_cuda
         cp build_cuda/libctranslate2.so libctranslate2_cuda.so
 
