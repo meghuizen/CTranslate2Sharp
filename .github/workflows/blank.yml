@@ -53,8 +53,9 @@ jobs:
     # ---------- build CUDA ----------
     - name: Build CUDA libctranslate2
       run: |
+        export CUDACXX="/usr/local/cuda/bin/nvcc"
         cmake -S ctranslate2 -B build_cuda -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CUDA_ARCHITECTURES=native -DCMAKE_BUILD_TYPE=Release \
               -DWITH_OPENBLAS=ON -DWITH_FLASH_ATTN=ON -DWITH_MKL=OFF -DWITH_CUDNN=ON \
               -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=ON -DWITH_TENSOR_PARALLEL=ON
         cmake --build build_cuda
