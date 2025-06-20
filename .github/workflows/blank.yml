@@ -1,0 +1,204 @@
+# .github/workflows/build-nuget.yml
+name: Build-CTranslate2-SWIG-NuGet
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  PKG_ID: CTranslate2Sharp
+  CT2_REPO: https://github.com/OpenNMT/CTranslate2
+  CT2_BUILD_TYPE: Release
+  SWIG_VERSION: "4.3.1"
+  NUGET_VERSION: "0.0.0-ci.${{ github.run_number }}"
+  WITH_CUDA_ON_WINDOWS: "false"   # set to "true" if you have a CUDA-enabled Win agent
+
+jobs:
+# ──────────────────────────── 1 ▸ L I N U X ────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+
+    # ---------- prerequisites ----------
+    - name: Install build deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build \
+             swig g++-13 clang clang++ git
+        # CUDA Toolkit (12.x) is already on ubuntu-latest
+
+    # ---------- clone CTranslate2 ----------
+    - name: Fetch latest CTranslate2
+      run: |
+        git clone --depth 1 $CT2_REPO ctranslate2
+
+    # ---------- build CPU ----------
+    - name: Build CPU libctranslate2
+      run: |
+        cmake -S ctranslate2 -B build_cpu -G Ninja \
+              -DCMAKE_BUILD_TYPE=$CT2_BUILD_TYPE \
+              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=OFF
+        cmake --build build_cpu
+        cp build_cpu/libctranslate2.so libctranslate2_cpu.so
+
+    # ---------- build CUDA ----------
+    - name: Build CUDA libctranslate2
+      run: |
+        cmake -S ctranslate2 -B build_cuda -G Ninja \
+              -DCMAKE_BUILD_TYPE=$CT2_BUILD_TYPE \
+              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=ON
+        cmake --build build_cuda
+        cp build_cuda/libctranslate2.so libctranslate2_cuda.so
+
+    # ---------- generate + link SWIG wrapper once, twice ----------
+    - name: Generate SWIG wrapper
+      run: |
+        swig -c++ -csharp -namespace CTranslate2 \
+             -Ictranslate2/include \
+             -o translator_wrap.cxx scripts/translator.i
+    - name: Build wrapper → CPU
+      run: |
+        g++ -std=c++17 -fPIC translator_wrap.cxx \
+            -Ictranslate2/include -I"$(swig -swiglib)/csharp" \
+            -shared -Lbuild_cpu -lctranslate2 \
+            -o libctranslate2sharp_cpu.so
+    - name: Build wrapper → CUDA
+      run: |
+        g++ -std=c++17 -fPIC translator_wrap.cxx \
+            -Ictranslate2/include -I"$(swig -swiglib)/csharp" \
+            -shared -Lbuild_cuda -lctranslate2 \
+            -o libctranslate2sharp_cuda.so
+
+    # ---------- pack native linux libs ----------
+    - name: Compress linux libs
+      run: |
+        mkdir -p linux/runtimes/linux-x64/native
+        mv libctranslate2*.so linux/runtimes/linux-x64/native/
+        tar czf linux-native.tar.gz -C linux .
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-native
+        path: linux-native.tar.gz
+
+# ────────────────────────── 2 ▸ W I N D O W S ──────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    env:
+      VSINSTALLDIR: C:\Program Files\Microsoft Visual Studio\2022\Enterprise
+    steps:
+    - uses: actions/checkout@v4
+
+    # ---------- prerequisites ----------
+    - name: Install SWIG & CMake
+      run: |
+        choco install -y swig --version %SWIG_VERSION% cmake ninja
+        refreshenv
+
+    # CUDA Toolkit install (optional compile-only)
+    - if: env.WITH_CUDA_ON_WINDOWS == 'true'
+      name: Install CUDA Toolkit
+      uses: Jimver/cuda-toolkit@v0.2.4
+      with:
+        method: 'network'
+        cuda: '12.4.1'   # latest long-term version at the moment
+
+    # ---------- clone CTranslate2 ----------
+    - name: Fetch latest CTranslate2
+      run: |
+        git clone --depth 1 %CT2_REPO% ctranslate2
+
+    # ---------- build CPU lib ----------
+    - name: Build CPU libctranslate2 (MSVC)
+      shell: pwsh
+      run: |
+        cmake -S ctranslate2 -B build_cpu -G "Visual Studio 17 2022" `
+              -DCMAKE_BUILD_TYPE=%CT2_BUILD_TYPE% `
+              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=OFF
+        cmake --build build_cpu --config %CT2_BUILD_TYPE%
+        Copy-Item build_cpu/%CT2_BUILD_TYPE%/ctranslate2.dll .
+
+    # ---------- OPTIONAL: build CUDA lib ----------
+    - if: env.WITH_CUDA_ON_WINDOWS == 'true'
+      name: Build CUDA libctranslate2
+      shell: pwsh
+      run: |
+        cmake -S ctranslate2 -B build_cuda -G "Visual Studio 17 2022" `
+              -DCMAKE_BUILD_TYPE=%CT2_BUILD_TYPE% `
+              -DBUILD_SHARED_LIBS=ON -DWITH_CUDA=ON
+        cmake --build build_cuda --config %CT2_BUILD_TYPE%
+        Copy-Item build_cuda/%CT2_BUILD_TYPE%/ctranslate2.dll ctranslate2_cuda.dll
+
+    # ---------- generate + link SWIG wrapper ----------
+    - name: Generate SWIG wrapper
+      run: |
+        swig -c++ -csharp -namespace CTranslate2 `
+             -Ictranslate2\include `
+             -o translator_wrap.cxx scripts\translator.i
+    - name: Build wrapper → CPU
+      run: |
+        cl /std:c++17 /EHsc /MD /LD translator_wrap.cxx `
+           /I"ctranslate2\include" /I"%SWIG_LIB%\csharp" `
+           build_cpu\%CT2_BUILD_TYPE%\ctranslate2.lib `
+           /Fe:ctranslate2sharp_cpu.dll
+    - if: env.WITH_CUDA_ON_WINDOWS == 'true'
+      name: Build wrapper → CUDA
+      run: |
+        cl /std:c++17 /EHsc /MD /LD translator_wrap.cxx `
+           /I"ctranslate2\include" /I"%SWIG_LIB%\csharp" `
+           build_cuda\%CT2_BUILD_TYPE%\ctranslate2.lib `
+           /Fe:ctranslate2sharp_cuda.dll
+
+    # ---------- pack native win libs ----------
+    - name: Compress windows libs
+      shell: pwsh
+      run: |
+        $dest = "win/runtimes/win-x64/native"
+        mkdir $dest -Force
+        Copy-Item ctranslate2*.dll $dest
+        Compress-Archive -Path win -DestinationPath win-native.zip
+    - uses: actions/upload-artifact@v4
+      with:
+        name: win-native
+        path: win-native.zip
+
+# ────────────────────── 3 ▸ P A C K A G E  (NuGet) ──────────────────────
+  package:
+    needs: [ build-linux, build-windows ]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    # ---------- download artifacts ----------
+    - uses: actions/download-artifact@v4
+      with: { name: linux-native }
+    - uses: actions/download-artifact@v4
+      with: { name: win-native }
+    - run: |
+        tar xzf linux-native.tar.gz
+        unzip -q win-native.zip
+
+    # ---------- generate SWIG C# (for pack-time only) ----------
+    - run: |
+        sudo apt-get update && sudo apt-get install -y swig
+        swig -c++ -csharp -namespace CTranslate2 \
+             -Ictranslate2/include \
+             -o translator_wrap_dummy.cxx scripts/translator.i
+        # We keep only the .cs files for the package
+        rm translator_wrap_dummy.cxx
+
+    # ---------- NuGet pack ----------
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'    # uses cache on ubuntu-latest
+    - run: dotnet pack scripts/$PKG_ID.csproj -c Release \
+           -p:PackageVersion=$NUGET_VERSION \
+           -o ./out
+    - uses: actions/upload-artifact@v4
+      with:
+        name: nuget-package
+        path: out/*.nupkg
